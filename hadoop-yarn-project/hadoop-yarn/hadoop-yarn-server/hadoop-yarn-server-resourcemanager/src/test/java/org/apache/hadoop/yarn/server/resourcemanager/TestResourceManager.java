@@ -23,10 +23,10 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.concurrent.TimeoutException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.http.lib.StaticUserWebFilter;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.security.AuthenticationFilterInitializer;
@@ -39,37 +39,51 @@ import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImpl;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeStartedEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAttemptRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeUpdateSchedulerEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.converter.FSConfigConverterTestCommons;
 import org.apache.hadoop.yarn.server.security.http.RMAuthenticationFilterInitializer;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class TestResourceManager {
-  private static final Log LOG = LogFactory.getLog(TestResourceManager.class);
-  
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestResourceManager.class);
+
   private ResourceManager resourceManager = null;
-  
+
+  @Rule
+  public ExpectedException thrown = ExpectedException.none();
+  private FSConfigConverterTestCommons converterTestCommons;
+
   @Before
   public void setUp() throws Exception {
-    Configuration conf = new YarnConfiguration();
-    conf.set(YarnConfiguration.RM_SCHEDULER,
-        CapacityScheduler.class.getCanonicalName());
+    YarnConfiguration conf = new YarnConfiguration();
     UserGroupInformation.setConfiguration(conf);
     resourceManager = new ResourceManager();
     resourceManager.init(conf);
     resourceManager.getRMContext().getContainerTokenSecretManager().rollMasterKey();
     resourceManager.getRMContext().getNMTokenSecretManager().rollMasterKey();
+
+    converterTestCommons = new FSConfigConverterTestCommons();
+    converterTestCommons.setUp();
   }
 
   @After
   public void tearDown() throws Exception {
     resourceManager.stop();
+    converterTestCommons.tearDown();
   }
 
   private org.apache.hadoop.yarn.server.resourcemanager.NodeManager
@@ -88,8 +102,9 @@ public class TestResourceManager {
   }
 
   @Test
-  public void testResourceAllocation() throws IOException,
-      YarnException, InterruptedException {
+  public void testResourceAllocation()
+      throws IOException, YarnException, InterruptedException,
+      TimeoutException {
     LOG.info("--- START: testResourceAllocation ---");
         
     final int memory = 4 * 1024;
@@ -107,6 +122,14 @@ public class TestResourceManager {
       registerNode(host2, 1234, 2345, NetworkTopology.DEFAULT_RACK, 
           Resources.createResource(memory/2, vcores/2));
 
+    // nodes should be in RUNNING state
+    RMNodeImpl node1 = (RMNodeImpl) resourceManager.getRMContext().getRMNodes().get(
+        nm1.getNodeId());
+    RMNodeImpl node2 = (RMNodeImpl) resourceManager.getRMContext().getRMNodes().get(
+        nm2.getNodeId());
+    node1.handle(new RMNodeStartedEvent(nm1.getNodeId(), null, null));
+    node2.handle(new RMNodeStartedEvent(nm2.getNodeId(), null, null));
+
     // Submit an application
     Application application = new Application("user1", resourceManager);
     application.submit();
@@ -117,8 +140,7 @@ public class TestResourceManager {
     // Application resource requirements
     final int memory1 = 1024;
     Resource capability1 = Resources.createResource(memory1, 1);
-    Priority priority1 = 
-      org.apache.hadoop.yarn.server.resourcemanager.resource.Priority.create(1);
+    Priority priority1 = Priority.newInstance(1);
     application.addResourceRequestSpec(priority1, capability1);
     
     Task t1 = new Task(application, priority1, new String[] {host1, host2});
@@ -126,8 +148,7 @@ public class TestResourceManager {
     
     final int memory2 = 2048;
     Resource capability2 = Resources.createResource(memory2, 1);
-    Priority priority0 = 
-        org.apache.hadoop.yarn.server.resourcemanager.resource.Priority.create(0); // higher
+    Priority priority0 = Priority.newInstance(0); // higher
     application.addResourceRequestSpec(priority0, capability2);
     
     // Send resource requests to the scheduler
@@ -135,6 +156,7 @@ public class TestResourceManager {
 
    // Send a heartbeat to kick the tires on the Scheduler
     nodeUpdate(nm1);
+    ((AbstractYarnScheduler)resourceManager.getResourceScheduler()).update();
     
     // Get allocations from the scheduler
     application.schedule();
@@ -215,7 +237,7 @@ public class TestResourceManager {
   @Test (timeout = 30000)
   public void testResourceManagerInitConfigValidation() throws Exception {
     Configuration conf = new YarnConfiguration();
-    conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, -1);
+    conf.setInt(YarnConfiguration.GLOBAL_RM_AM_MAX_ATTEMPTS, -1);
     try {
       resourceManager = new MockRM(conf);
       fail("Exception is expected because the global max attempts" +
@@ -224,6 +246,17 @@ public class TestResourceManager {
       // Exception is expected.
       if (!e.getMessage().startsWith(
               "Invalid global max attempts configuration")) throw e;
+    }
+    Configuration yarnConf = new YarnConfiguration();
+    yarnConf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, -1);
+    try {
+      resourceManager = new MockRM(yarnConf);
+      fail("Exception is expected because AM max attempts" +
+          " is negative.");
+    } catch (YarnRuntimeException e) {
+      // Exception is expected.
+      if (!e.getMessage().startsWith(
+              "Invalid rm am max attempts configuration")) throw e;
     }
   }
 
@@ -264,8 +297,6 @@ public class TestResourceManager {
         }
       };
       Configuration conf = new YarnConfiguration();
-      conf.set(YarnConfiguration.RM_SCHEDULER,
-        CapacityScheduler.class.getCanonicalName());
       conf.set(filterInitializerConfKey, filterInitializer);
       conf.set("hadoop.security.authentication", "kerberos");
       conf.set("hadoop.http.authentication.type", "kerberos");
@@ -300,8 +331,6 @@ public class TestResourceManager {
     for (String filterInitializer : simpleFilterInitializers) {
       resourceManager = new ResourceManager();
       Configuration conf = new YarnConfiguration();
-      conf.set(YarnConfiguration.RM_SCHEDULER,
-        CapacityScheduler.class.getCanonicalName());
       conf.set(filterInitializerConfKey, filterInitializer);
       try {
         UserGroupInformation.setConfiguration(conf);
@@ -323,4 +352,25 @@ public class TestResourceManager {
     }
   }
 
+  /**
+   * Test whether ResourceManager passes user-provided conf to
+   * UserGroupInformation class. If it reads this (incorrect)
+   * AuthenticationMethod enum an exception is thrown.
+   */
+  @Test
+  public void testUserProvidedUGIConf() throws Exception {
+    thrown.expect(IllegalArgumentException.class);
+    thrown.expectMessage("Invalid attribute value for "
+        + CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION
+        + " of DUMMYAUTH");
+    Configuration dummyConf = new YarnConfiguration();
+    dummyConf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION,
+        "DUMMYAUTH");
+    ResourceManager dummyResourceManager = new ResourceManager();
+    try {
+      dummyResourceManager.init(dummyConf);
+    } finally {
+      dummyResourceManager.stop();
+    }
+  }
 }

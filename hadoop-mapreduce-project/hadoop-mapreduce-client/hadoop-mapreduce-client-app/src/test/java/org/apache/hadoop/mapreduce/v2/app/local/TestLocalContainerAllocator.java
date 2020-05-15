@@ -17,7 +17,8 @@
 */
 package org.apache.hadoop.mapreduce.v2.app.local;
 
-import static org.mockito.Matchers.isA;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -202,8 +203,8 @@ public class TestLocalContainerAllocator {
     Container container = containerAssignedCaptor.getValue().getContainer();
     Resource containerResource = container.getResource();
     Assert.assertNotNull(containerResource);
-    Assert.assertEquals(containerResource.getMemorySize(), 0);
-    Assert.assertEquals(containerResource.getVirtualCores(), 0);
+    assertThat(containerResource.getMemorySize()).isEqualTo(0);
+    assertThat(containerResource.getVirtualCores()).isEqualTo(0);
   }
 
   private static ContainerAllocatorEvent createContainerRequestEvent() {
@@ -247,8 +248,8 @@ public class TestLocalContainerAllocator {
       ApplicationAttemptId attemptId =
           ApplicationAttemptId.newInstance(appId, 1);
       Job job = mock(Job.class);
-      @SuppressWarnings("rawtypes")
-      EventHandler eventHandler = mock(EventHandler.class);
+      @SuppressWarnings("unchecked")
+      EventHandler<Event> eventHandler = mock(EventHandler.class);
       AppContext ctx = mock(AppContext.class);
       when(ctx.getApplicationID()).thenReturn(appId);
       when(ctx.getApplicationAttemptId()).thenReturn(attemptId);

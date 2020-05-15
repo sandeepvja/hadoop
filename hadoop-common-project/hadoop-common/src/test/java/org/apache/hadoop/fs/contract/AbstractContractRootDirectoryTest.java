@@ -27,11 +27,19 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.RemoteIterator;
+import org.apache.hadoop.test.LambdaTestUtils;
 
+import static org.apache.commons.lang3.StringUtils.join;
 import static org.apache.hadoop.fs.contract.ContractTestUtils.createFile;
 import static org.apache.hadoop.fs.contract.ContractTestUtils.dataset;
+import static org.apache.hadoop.fs.contract.ContractTestUtils.deleteChildren;
+import static org.apache.hadoop.fs.contract.ContractTestUtils.dumpStats;
+import static org.apache.hadoop.fs.contract.ContractTestUtils.listChildren;
 import static org.apache.hadoop.fs.contract.ContractTestUtils.toList;
 import static org.apache.hadoop.fs.contract.ContractTestUtils.treeWalk;
 
@@ -43,6 +51,7 @@ import static org.apache.hadoop.fs.contract.ContractTestUtils.treeWalk;
 public abstract class AbstractContractRootDirectoryTest extends AbstractFSContractTestBase {
   private static final Logger LOG =
       LoggerFactory.getLogger(AbstractContractRootDirectoryTest.class);
+  public static final int OBJECTSTORE_RETRY_TIMEOUT = 30000;
 
   @Override
   public void setup() throws Exception {
@@ -62,12 +71,51 @@ public abstract class AbstractContractRootDirectoryTest extends AbstractFSContra
   }
 
   @Test
-  public void testRmEmptyRootDirNonRecursive() throws Throwable {
+  public void testRmEmptyRootDirRecursive() throws Throwable {
     //extra sanity checks here to avoid support calls about complete loss of data
     skipIfUnsupported(TEST_ROOT_TESTS_ENABLED);
     Path root = new Path("/");
     assertIsDirectory(root);
     boolean deleted = getFileSystem().delete(root, true);
+    LOG.info("rm -r / of empty dir result is {}", deleted);
+    assertIsDirectory(root);
+  }
+
+  @Test
+  public void testRmEmptyRootDirNonRecursive() throws Throwable {
+    // extra sanity checks here to avoid support calls about complete loss
+    // of data
+    skipIfUnsupported(TEST_ROOT_TESTS_ENABLED);
+    final Path root = new Path("/");
+    assertIsDirectory(root);
+    // make sure the directory is clean. This includes some retry logic
+    // to forgive blobstores whose listings can be out of sync with the file
+    // status;
+    final FileSystem fs = getFileSystem();
+    final AtomicInteger iterations = new AtomicInteger(0);
+    final FileStatus[] originalChildren = listChildren(fs, root);
+    LambdaTestUtils.eventually(
+        OBJECTSTORE_RETRY_TIMEOUT,
+        new Callable<Void>() {
+          @Override
+          public Void call() throws Exception {
+            FileStatus[] deleted = deleteChildren(fs, root, true);
+            FileStatus[] children = listChildren(fs, root);
+            if (children.length > 0) {
+              fail(String.format(
+                  "After %d attempts: listing after rm /* not empty"
+                      + "\n%s\n%s\n%s",
+                  iterations.incrementAndGet(),
+                  dumpStats("final", children),
+                  dumpStats("deleted", deleted),
+                  dumpStats("original", originalChildren)));
+            }
+            return null;
+          }
+        },
+        new LambdaTestUtils.ProportionalRetryInterval(50, 1000));
+    // then try to delete the empty one
+    boolean deleted = fs.delete(root, false);
     LOG.info("rm / of empty dir result is {}", deleted);
     assertIsDirectory(root);
   }
@@ -88,6 +136,8 @@ public abstract class AbstractContractRootDirectoryTest extends AbstractFSContra
     } catch (IOException e) {
       //expected
       handleExpectedException(e);
+      // and the file must still be present
+      assertIsFile(file);
     } finally {
       getFileSystem().delete(file, false);
     }
@@ -101,14 +151,18 @@ public abstract class AbstractContractRootDirectoryTest extends AbstractFSContra
     Path root = new Path("/");
     assertIsDirectory(root);
     Path file = new Path("/testRmRootRecursive");
-    ContractTestUtils.touch(getFileSystem(), file);
-    boolean deleted = getFileSystem().delete(root, true);
-    assertIsDirectory(root);
-    LOG.info("rm -rf / result is {}", deleted);
-    if (deleted) {
-      assertPathDoesNotExist("expected file to be deleted", file);
-    } else {
-      assertPathExists("expected file to be preserved", file);;
+    try {
+      ContractTestUtils.touch(getFileSystem(), file);
+      boolean deleted = getFileSystem().delete(root, true);
+      assertIsDirectory(root);
+      LOG.info("rm -rf / result is {}", deleted);
+      if (deleted) {
+        assertPathDoesNotExist("expected file to be deleted", file);
+      } else {
+        assertPathExists("expected file to be preserved", file);
+      }
+    } finally{
+      getFileSystem().delete(file, false);
     }
   }
 
@@ -135,17 +189,36 @@ public abstract class AbstractContractRootDirectoryTest extends AbstractFSContra
     Path root = new Path("/");
     FileStatus[] statuses = fs.listStatus(root);
     for (FileStatus status : statuses) {
-      ContractTestUtils.assertDeleted(fs, status.getPath(), true);
+      ContractTestUtils.assertDeleted(fs, status.getPath(), false, true, false);
     }
-    assertEquals("listStatus on empty root-directory returned a non-empty list",
-        0, fs.listStatus(root).length);
-    assertFalse("listFiles(/, false).hasNext",
-        fs.listFiles(root, false).hasNext());
-    assertFalse("listFiles(/, true).hasNext",
-        fs.listFiles(root, true).hasNext());
-    assertFalse("listLocatedStatus(/).hasNext",
-        fs.listLocatedStatus(root).hasNext());
+    FileStatus[] rootListStatus = fs.listStatus(root);
+    assertEquals("listStatus on empty root-directory returned found: "
+        + join("\n", rootListStatus),
+        0, rootListStatus.length);
+    assertNoElements("listFiles(/, false)",
+        fs.listFiles(root, false));
+    assertNoElements("listFiles(/, true)",
+        fs.listFiles(root, true));
+    assertNoElements("listLocatedStatus(/)",
+        fs.listLocatedStatus(root));
     assertIsDirectory(root);
+  }
+
+  /**
+   * Assert that an iterator has no elements; the raised exception
+   * will include the element list.
+   * @param operation operation for assertion text.
+   * @param iter iterator
+   * @throws IOException failure retrieving the values.
+   */
+  protected void assertNoElements(String operation,
+      RemoteIterator<LocatedFileStatus> iter) throws IOException {
+    List<LocatedFileStatus> resultList = toList(iter);
+    if (!resultList.isEmpty()) {
+      fail("Expected no results from " + operation + ", but got "
+          + resultList.size() + " elements:\n"
+          + join(resultList, "\n"));
+    }
   }
 
   @Test
@@ -154,11 +227,21 @@ public abstract class AbstractContractRootDirectoryTest extends AbstractFSContra
     FileSystem fs = getFileSystem();
     Path root = new Path("/");
     FileStatus[] statuses = fs.listStatus(root);
+    String listStatusResult = join(statuses, "\n");
     List<LocatedFileStatus> locatedStatusList = toList(
         fs.listLocatedStatus(root));
-    assertEquals(statuses.length, locatedStatusList.size());
+    String locatedStatusResult = join(locatedStatusList, "\n");
+
+    assertEquals("listStatus(/) vs listLocatedStatus(/) with \n"
+            + "listStatus =" + listStatusResult
+            +" listLocatedStatus = " + locatedStatusResult,
+        statuses.length, locatedStatusList.size());
     List<LocatedFileStatus> fileList = toList(fs.listFiles(root, false));
-    assertTrue(fileList.size() <= statuses.length);
+    String listFilesResult = join(fileList, "\n");
+    assertTrue("listStatus(/) vs listFiles(/, false) with \n"
+            + "listStatus = " + listStatusResult
+            + "listFiles = " + listFilesResult,
+        fileList.size() <= statuses.length);
   }
 
   @Test

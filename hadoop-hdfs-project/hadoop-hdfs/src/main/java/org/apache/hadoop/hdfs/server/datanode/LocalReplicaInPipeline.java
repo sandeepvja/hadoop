@@ -22,7 +22,11 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
@@ -30,7 +34,6 @@ import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.ReplicaOutputStreams;
 import org.apache.hadoop.hdfs.server.protocol.ReplicaRecoveryInfo;
 import org.apache.hadoop.io.IOUtils;
-import org.apache.hadoop.io.nativeio.NativeIO;
 import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.StringUtils;
 
@@ -43,7 +46,11 @@ import org.apache.hadoop.util.StringUtils;
  * The base class implements a temporary replica
  */
 public class LocalReplicaInPipeline extends LocalReplica
-                        implements ReplicaInPipeline {
+    implements ReplicaInPipeline {
+
+  private final Lock lock = new ReentrantLock();
+  private final Condition bytesOnDiskChange = lock.newCondition();
+
   private long bytesAcked;
   private long bytesOnDisk;
   private byte[] lastChecksum;
@@ -168,16 +175,47 @@ public class LocalReplicaInPipeline extends LocalReplica
     bytesReserved = 0;
   }
 
-  @Override // ReplicaInPipeline
-  public synchronized void setLastChecksumAndDataLen(long dataLength,
-      byte[] checksum) {
-    this.bytesOnDisk = dataLength;
-    this.lastChecksum = checksum;
+  @Override
+  public void setLastChecksumAndDataLen(long dataLength, byte[] checksum) {
+    lock.lock();
+    try {
+      this.bytesOnDisk = dataLength;
+      this.lastChecksum = checksum;
+      bytesOnDiskChange.signalAll();
+    } finally {
+      lock.unlock();
+    }
   }
 
-  @Override // ReplicaInPipeline
-  public synchronized ChunkChecksum getLastChecksumAndDataLen() {
-    return new ChunkChecksum(getBytesOnDisk(), lastChecksum);
+  @Override
+  public ChunkChecksum getLastChecksumAndDataLen() {
+    lock.lock();
+    try {
+      return new ChunkChecksum(getBytesOnDisk(), lastChecksum);
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  @Override
+  public void waitForMinLength(long minLength, long time, TimeUnit unit)
+      throws IOException {
+    long nanos = unit.toNanos(time);
+    lock.lock();
+    try {
+      while (bytesOnDisk < minLength) {
+        if (nanos <= 0L) {
+          throw new IOException(
+              String.format("Need %d bytes, but only %d bytes available",
+                  minLength, bytesOnDisk));
+        }
+        nanos = bytesOnDiskChange.awaitNanos(nanos);
+      }
+    } catch (InterruptedException e) {
+      throw new IOException(e);
+    } finally {
+      lock.unlock();
+    }
   }
 
   @Override // ReplicaInPipeline
@@ -247,8 +285,8 @@ public class LocalReplicaInPipeline extends LocalReplica
   @Override // ReplicaInPipeline
   public ReplicaOutputStreams createStreams(boolean isCreate,
       DataChecksum requestedChecksum) throws IOException {
-    File blockFile = getBlockFile();
-    File metaFile = getMetaFile();
+    final File blockFile = getBlockFile();
+    final File metaFile = getMetaFile();
     if (DataNode.LOG.isDebugEnabled()) {
       DataNode.LOG.debug("writeTo blockfile is " + blockFile +
                          " of size " + blockFile.length());
@@ -262,14 +300,16 @@ public class LocalReplicaInPipeline extends LocalReplica
     // may differ from requestedChecksum for appends.
     final DataChecksum checksum;
 
-    RandomAccessFile metaRAF = new RandomAccessFile(metaFile, "rw");
+    final RandomAccessFile metaRAF =
+        getFileIoProvider().getRandomAccessFile(getVolume(), metaFile, "rw");
 
     if (!isCreate) {
       // For append or recovery, we must enforce the existing checksum.
       // Also, verify that the file has correct lengths, etc.
       boolean checkedMeta = false;
       try {
-        BlockMetadataHeader header = BlockMetadataHeader.readHeader(metaRAF);
+        BlockMetadataHeader header =
+            BlockMetadataHeader.readHeader(metaRAF);
         checksum = header.getChecksum();
 
         if (checksum.getBytesPerChecksum() !=
@@ -302,20 +342,22 @@ public class LocalReplicaInPipeline extends LocalReplica
       checksum = requestedChecksum;
     }
 
+    final FileIoProvider fileIoProvider = getFileIoProvider();
     FileOutputStream blockOut = null;
     FileOutputStream crcOut = null;
     try {
-      blockOut = new FileOutputStream(
-          new RandomAccessFile(blockFile, "rw").getFD());
-      crcOut = new FileOutputStream(metaRAF.getFD());
+      blockOut = fileIoProvider.getFileOutputStream(
+          getVolume(), new RandomAccessFile(blockFile, "rw").getFD());
+      crcOut = fileIoProvider.getFileOutputStream(getVolume(), metaRAF.getFD());
       if (!isCreate) {
         blockOut.getChannel().position(blockDiskSize);
         crcOut.getChannel().position(crcDiskSize);
       }
       return new ReplicaOutputStreams(blockOut, crcOut, checksum,
-          getVolume().isTransientStorage());
+          getVolume(), fileIoProvider);
     } catch (IOException e) {
       IOUtils.closeStream(blockOut);
+      IOUtils.closeStream(crcOut);
       IOUtils.closeStream(metaRAF);
       throw e;
     }
@@ -326,11 +368,11 @@ public class LocalReplicaInPipeline extends LocalReplica
     File blockFile = getBlockFile();
     File restartMeta = new File(blockFile.getParent()  +
         File.pathSeparator + "." + blockFile.getName() + ".restart");
-    if (restartMeta.exists() && !restartMeta.delete()) {
+    if (!getFileIoProvider().deleteWithExistsCheck(getVolume(), restartMeta)) {
       DataNode.LOG.warn("Failed to delete restart meta file: " +
           restartMeta.getPath());
     }
-    return new FileOutputStream(restartMeta);
+    return getFileIoProvider().getFileOutputStream(getVolume(), restartMeta);
   }
 
   @Override
@@ -373,40 +415,32 @@ public class LocalReplicaInPipeline extends LocalReplica
           + " should be derived from LocalReplica");
     }
 
-    LocalReplica localReplica = (LocalReplica) oldReplicaInfo;
+    final LocalReplica oldReplica = (LocalReplica) oldReplicaInfo;
+    final File oldBlockFile = oldReplica.getBlockFile();
+    final File oldmeta = oldReplica.getMetaFile();
+    final File newmeta = getMetaFile();
+    final FileIoProvider fileIoProvider = getFileIoProvider();
 
-    File oldmeta = localReplica.getMetaFile();
-    File newmeta = getMetaFile();
-
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Renaming " + oldmeta + " to " + newmeta);
-    }
     try {
-      NativeIO.renameTo(oldmeta, newmeta);
+      fileIoProvider.rename(getVolume(), oldmeta, newmeta);
     } catch (IOException e) {
       throw new IOException("Block " + oldReplicaInfo + " reopen failed. " +
                             " Unable to move meta file  " + oldmeta +
                             " to rbw dir " + newmeta, e);
     }
 
-    File blkfile = localReplica.getBlockFile();
-
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Renaming " + blkfile + " to " + newBlkFile
-          + ", file length=" + blkfile.length());
-    }
     try {
-      NativeIO.renameTo(blkfile, newBlkFile);
+      fileIoProvider.rename(getVolume(), oldBlockFile, newBlkFile);
     } catch (IOException e) {
       try {
-        NativeIO.renameTo(newmeta, oldmeta);
+        fileIoProvider.rename(getVolume(), newmeta, oldmeta);
       } catch (IOException ex) {
         LOG.warn("Cannot move meta file " + newmeta +
             "back to the finalized directory " + oldmeta, ex);
       }
       throw new IOException("Block " + oldReplicaInfo + " reopen failed. " +
-                              " Unable to move block file " + blkfile +
-                              " to rbw dir " + newBlkFile, e);
+          " Unable to move block file " + oldReplica.getBlockFile() +
+          " to rbw dir " + newBlkFile, e);
     }
   }
 

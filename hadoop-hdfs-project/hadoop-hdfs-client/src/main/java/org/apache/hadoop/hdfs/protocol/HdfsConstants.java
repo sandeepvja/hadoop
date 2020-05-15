@@ -47,9 +47,12 @@ public final class HdfsConstants {
   public static final String WARM_STORAGE_POLICY_NAME = "WARM";
   public static final byte COLD_STORAGE_POLICY_ID = 2;
   public static final String COLD_STORAGE_POLICY_NAME = "COLD";
+  public static final byte PROVIDED_STORAGE_POLICY_ID = 1;
+  public static final String PROVIDED_STORAGE_POLICY_NAME = "PROVIDED";
 
-  // TODO should be conf injected?
-  public static final int DEFAULT_DATA_SOCKET_SIZE = 128 * 1024;
+
+  public static final int DEFAULT_DATA_SOCKET_SIZE = 0;
+
   /**
    * A special path component contained in the path for a snapshot file/dir
    */
@@ -58,6 +61,10 @@ public final class HdfsConstants {
           = Path.SEPARATOR + DOT_SNAPSHOT_DIR;
   public static final String SEPARATOR_DOT_SNAPSHOT_DIR_SEPARATOR
       = Path.SEPARATOR + DOT_SNAPSHOT_DIR + Path.SEPARATOR;
+  public final static String DOT_RESERVED_STRING = ".reserved";
+  public final static String DOT_RESERVED_PATH_PREFIX = Path.SEPARATOR
+      + DOT_RESERVED_STRING;
+  public final static String DOT_INODES_STRING = ".inodes";
 
   /**
    * Generation stamp of blocks that pre-date the introduction
@@ -85,6 +92,11 @@ public final class HdfsConstants {
    */
   public static final String CLIENT_NAMENODE_PROTOCOL_NAME =
       "org.apache.hadoop.hdfs.protocol.ClientProtocol";
+  /**
+   * Router admin Protocol Names.
+   */
+  public static final String ROUTER_ADMIN_PROTOCOL_NAME =
+      "org.apache.hadoop.hdfs.protocolPB.RouterAdminProtocol";
 
   // Timeouts for communicating with DataNode for streaming writes/reads
   public static final int READ_TIMEOUT = 60 * 1000;
@@ -104,21 +116,42 @@ public final class HdfsConstants {
    * lease, another client can preempt the lease.
    */
   public static final long LEASE_SOFTLIMIT_PERIOD = 60 * 1000;
-  /**
-   * For a HDFS client to write to a file, a lease is granted; During the lease
-   * period, no other client can write to the file. The writing client can
-   * periodically renew the lease. When the file is closed, the lease is
-   * revoked. The lease duration is bound by a
-   * {@link HdfsConstants#LEASE_SOFTLIMIT_PERIOD soft limit} and this hard
-   * limit. If after the hard limit expires and the client has failed to renew
-   * the lease, HDFS assumes that the client has quit and will automatically
-   * close the file on behalf of the writer, and recover the lease.
-   */
-  public static final long LEASE_HARDLIMIT_PERIOD = 60 * LEASE_SOFTLIMIT_PERIOD;
 
   // SafeMode actions
   public enum SafeModeAction {
     SAFEMODE_LEAVE, SAFEMODE_ENTER, SAFEMODE_GET, SAFEMODE_FORCE_EXIT
+  }
+
+  /**
+   * Storage policy satisfier service modes.
+   */
+  public enum StoragePolicySatisfierMode {
+
+    /**
+     * This mode represents that SPS service is running outside Namenode as an
+     * external service and can accept any SPS call request.
+     */
+    EXTERNAL,
+
+    /**
+     * This mode represents that SPS service is disabled and cannot accept any
+     * SPS call request.
+     */
+    NONE;
+
+    private static final Map<String, StoragePolicySatisfierMode> MAP =
+        new HashMap<>();
+
+    static {
+      for (StoragePolicySatisfierMode a : values()) {
+        MAP.put(a.name(), a);
+      }
+    }
+
+    /** Convert the given String to a StoragePolicySatisfierMode. */
+    public static StoragePolicySatisfierMode fromString(String s) {
+      return MAP.get(StringUtils.toUpperCase(s));
+    }
   }
 
   public enum RollingUpgradeAction {
@@ -139,14 +172,24 @@ public final class HdfsConstants {
     }
   }
 
-  // type of the datanode report
-  public enum DatanodeReportType {
-    ALL, LIVE, DEAD, DECOMMISSIONING, ENTERING_MAINTENANCE
+  /**
+   * Upgrade actions.
+   */
+  public enum UpgradeAction {
+    QUERY, FINALIZE;
   }
 
-  public static final byte RS_6_3_POLICY_ID = 0;
-  public static final byte RS_3_2_POLICY_ID = 1;
-  public static final byte RS_6_3_LEGACY_POLICY_ID = 2;
+  // type of the datanode report
+  public enum DatanodeReportType {
+    ALL, LIVE, DEAD, DECOMMISSIONING, ENTERING_MAINTENANCE, IN_MAINTENANCE
+  }
+
+  /**
+   * Re-encrypt encryption zone actions.
+   */
+  public enum ReencryptAction {
+    CANCEL, START
+  }
 
   /* Hidden constructor */
   protected HdfsConstants() {

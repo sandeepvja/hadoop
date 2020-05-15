@@ -17,9 +17,11 @@
  */
 package org.apache.hadoop.hdfs.server.namenode;
 
+import org.apache.hadoop.fs.permission.FsCreateModes;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
-import org.apache.hadoop.fs.InvalidPathException;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.FsAction;
@@ -27,9 +29,10 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.protocol.AclException;
-import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
+import org.apache.hadoop.security.AccessControlException;
 
 import java.io.IOException;
 import java.util.List;
@@ -37,23 +40,15 @@ import static org.apache.hadoop.util.Time.now;
 
 class FSDirMkdirOp {
 
-  static HdfsFileStatus mkdirs(FSNamesystem fsn, String src,
+  static FileStatus mkdirs(FSNamesystem fsn, FSPermissionChecker pc, String src,
       PermissionStatus permissions, boolean createParent) throws IOException {
     FSDirectory fsd = fsn.getFSDirectory();
     if(NameNode.stateChangeLog.isDebugEnabled()) {
       NameNode.stateChangeLog.debug("DIR* NameSystem.mkdirs: " + src);
     }
-    if (!DFSUtil.isValidName(src)) {
-      throw new InvalidPathException(src);
-    }
-    FSPermissionChecker pc = fsd.getPermissionChecker();
     fsd.writeLock();
     try {
-      INodesInPath iip = fsd.resolvePathForWrite(pc, src);
-      src = iip.getPath();
-      if (fsd.isPermissionEnabled()) {
-        fsd.checkTraverse(pc, iip);
-      }
+      INodesInPath iip = fsd.resolvePath(pc, src, DirOp.CREATE);
 
       final INode lastINode = iip.getLastINode();
       if (lastINode != null && lastINode.isFile()) {
@@ -66,7 +61,7 @@ class FSDirMkdirOp {
         }
 
         if (!createParent) {
-          fsd.verifyParentDir(iip, src);
+          fsd.verifyParentDir(iip);
         }
 
         // validate that we have enough inodes. This is, at best, a
@@ -116,10 +111,7 @@ class FSDirMkdirOp {
    * Create all ancestor directories and return the parent inodes.
    *
    * @param fsd FSDirectory
-   * @param existing The INodesInPath instance containing all the existing
-   *                 ancestral INodes
-   * @param children The relative path from the parent towards children,
-   *                 starting with "/"
+   * @param iip inodes in path to the fs directory
    * @param perm the permission of the directory. Note that all ancestors
    *             created along the path has implicit {@code u+wx} permissions.
    * @param inheritPerms if the ancestor directories should inherit permissions
@@ -159,9 +151,10 @@ class FSDirMkdirOp {
   static void mkdirForEditLog(FSDirectory fsd, long inodeId, String src,
       PermissionStatus permissions, List<AclEntry> aclEntries, long timestamp)
       throws QuotaExceededException, UnresolvedLinkException, AclException,
-      FileAlreadyExistsException {
+      FileAlreadyExistsException, ParentNotDirectoryException,
+      AccessControlException {
     assert fsd.hasWriteLock();
-    INodesInPath iip = fsd.getINodesInPath(src, false);
+    INodesInPath iip = fsd.getINodesInPath(src, DirOp.WRITE_LINK);
     final byte[] localName = iip.getLastLocalName();
     final INodesInPath existing = iip.getParentINodesInPath();
     Preconditions.checkState(existing.getLastINode() != null);
@@ -195,10 +188,19 @@ class FSDirMkdirOp {
   private static PermissionStatus addImplicitUwx(PermissionStatus parentPerm,
       PermissionStatus perm) {
     FsPermission p = parentPerm.getPermission();
-    FsPermission ancestorPerm = new FsPermission(
-        p.getUserAction().or(FsAction.WRITE_EXECUTE),
-        p.getGroupAction(),
-        p.getOtherAction());
+    FsPermission ancestorPerm;
+    if (p.getUnmasked() == null) {
+      ancestorPerm = new FsPermission(
+          p.getUserAction().or(FsAction.WRITE_EXECUTE),
+          p.getGroupAction(),
+          p.getOtherAction());
+    } else {
+      ancestorPerm = FsCreateModes.create(
+          new FsPermission(
+            p.getUserAction().or(FsAction.WRITE_EXECUTE),
+            p.getGroupAction(),
+            p.getOtherAction()), p.getUnmasked());
+    }
     return new PermissionStatus(perm.getUserName(), perm.getGroupName(),
         ancestorPerm);
   }

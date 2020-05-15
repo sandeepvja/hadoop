@@ -19,7 +19,6 @@
 package org.apache.hadoop.fs;
 
 import static org.junit.Assert.*;
-import static org.mockito.Matchers.*;
 import static org.mockito.Mockito.*;
 
 import java.io.IOException;
@@ -36,6 +35,7 @@ import org.apache.hadoop.fs.Options.CreateOpts;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.security.token.DelegationTokenIssuer;
 import org.apache.hadoop.util.Progressable;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -64,7 +64,6 @@ public class TestFilterFileSystem {
     public FSDataOutputStream append(Path f, int bufferSize) throws
         IOException;
     public long getLength(Path f);
-    public void rename(Path src, Path dst, Rename... options);
     public boolean exists(Path f);
     public boolean isDirectory(Path f);
     public boolean isFile(Path f);
@@ -78,8 +77,8 @@ public class TestFilterFileSystem {
         boolean overwrite, int bufferSize, short replication, long blockSize,
         Progressable progress) throws IOException;
 
-    public boolean mkdirs(Path f);
     public FSDataInputStream open(Path f);
+    public FSDataInputStream open(PathHandle f);
     public FSDataOutputStream create(Path f);
     public FSDataOutputStream create(Path f, boolean overwrite);
     public FSDataOutputStream create(Path f, Progressable progress);
@@ -125,6 +124,8 @@ public class TestFilterFileSystem {
     public int getDefaultPort();
     public String getCanonicalServiceName();
     public Token<?> getDelegationToken(String renewer) throws IOException;
+    public DelegationTokenIssuer[] getAdditionalTokenIssuers()
+        throws IOException;
     public boolean deleteOnExit(Path f) throws IOException;
     public boolean cancelDeleteOnExit(Path f) throws IOException;
     public Token<?>[] addDelegationTokens(String renewer, Credentials creds)
@@ -133,6 +134,8 @@ public class TestFilterFileSystem {
     public Path fixRelativePart(Path p);
     public ContentSummary getContentSummary(Path f);
     public QuotaUsage getQuotaUsage(Path f);
+    void setQuota(Path f, long namespaceQuota, long storagespaceQuota);
+    void setQuotaByStorageType(Path f, StorageType type, long quota);
     StorageStatistics getStorageStatistics();
   }
 
@@ -262,6 +265,17 @@ public class TestFilterFileSystem {
     reset(mockFs);
     fs.setWriteChecksum(true);
     verify(mockFs).setWriteChecksum(eq(true));
+  }
+
+  @Test
+  public void testRenameOptions() throws Exception {
+    FileSystem mockFs = mock(FileSystem.class);
+    FileSystem fs = new FilterFileSystem(mockFs);
+    Path src = new Path("/src");
+    Path dst = new Path("/dest");
+    Rename opt = Rename.TO_TRASH;
+    fs.rename(src, dst, opt);
+    verify(mockFs).rename(eq(src), eq(dst), eq(opt));
   }
 
   private void checkInit(FilterFileSystem fs, boolean expectInit)

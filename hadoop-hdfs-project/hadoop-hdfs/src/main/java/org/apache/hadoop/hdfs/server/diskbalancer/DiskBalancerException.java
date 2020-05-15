@@ -40,6 +40,8 @@ public class DiskBalancerException extends IOException {
     NO_SUCH_PLAN,
     UNKNOWN_KEY,
     INVALID_NODE,
+    DATANODE_STATUS_NOT_REGULAR,
+    INVALID_HOST_FILE_PATH,
   }
 
   private final Result result;
@@ -58,7 +60,6 @@ public class DiskBalancerException extends IOException {
   /**
    * Constructs an {@code IOException} with the specified detail message and
    * cause.
-   * <p/>
    * <p> Note that the detail message associated with {@code cause} is
    * <i>not</i>
    * automatically incorporated into this exception's detail message.

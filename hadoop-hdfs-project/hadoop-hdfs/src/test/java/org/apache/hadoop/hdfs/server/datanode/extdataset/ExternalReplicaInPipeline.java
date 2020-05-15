@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.datanode.extdataset;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.ReplicaState;
 import org.apache.hadoop.hdfs.server.datanode.ChunkChecksum;
@@ -58,8 +59,10 @@ public class ExternalReplicaInPipeline implements ReplicaInPipeline {
 
   @Override
   public ReplicaOutputStreams createStreams(boolean isCreate,
-      DataChecksum requestedChecksum) throws IOException {
-    return new ReplicaOutputStreams(null, null, requestedChecksum, false);
+      DataChecksum requestedChecksum)
+      throws IOException {
+    return new ReplicaOutputStreams(null, null, requestedChecksum,
+        null, null);
   }
 
   @Override
@@ -126,5 +129,10 @@ public class ExternalReplicaInPipeline implements ReplicaInPipeline {
 
   @Override
   public void interruptThread() {
+  }
+
+  @Override
+  public void waitForMinLength(long minLength, long time, TimeUnit unit)
+      throws IOException {
   }
 }

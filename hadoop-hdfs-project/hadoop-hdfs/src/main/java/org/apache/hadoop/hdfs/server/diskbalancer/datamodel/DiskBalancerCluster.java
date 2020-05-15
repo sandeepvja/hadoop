@@ -17,6 +17,10 @@
 
 package org.apache.hadoop.hdfs.server.diskbalancer.datamodel;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.base.Preconditions;
 
 import org.apache.commons.io.FileUtils;
@@ -27,13 +31,10 @@ import org.apache.hadoop.hdfs.server.diskbalancer.planner.NodePlan;
 import org.apache.hadoop.hdfs.server.diskbalancer.planner.Planner;
 import org.apache.hadoop.hdfs.server.diskbalancer.planner.PlannerFactory;
 import org.apache.hadoop.hdfs.web.JsonUtil;
-import org.codehaus.jackson.annotate.JsonIgnore;
-import org.codehaus.jackson.annotate.JsonIgnoreProperties;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.map.ObjectReader;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
@@ -49,21 +50,20 @@ import java.util.concurrent.Future;
 
 /**
  * DiskBalancerCluster represents the nodes that we are working against.
- * <p/>
+ * <p>
  * Please Note :
- * <p/>
  * Semantics of inclusionList and exclusionLists.
- * <p/>
+ * <p>
  * If a non-empty inclusionList is specified then the diskBalancer assumes that
  * the user is only interested in processing that list of nodes. This node list
  * is checked against the exclusionList and only the nodes in inclusionList but
  * not in exclusionList is processed.
- * <p/>
+ * <p>
  * if inclusionList is empty, then we assume that all live nodes in the nodes is
  * to be processed by diskBalancer. In that case diskBalancer will avoid any
  * nodes specified in the exclusionList but will process all nodes in the
  * cluster.
- * <p/>
+ * <p>
  * In other words, an empty inclusionList is means all the nodes otherwise
  * only a given list is processed and ExclusionList is always honored.
  */
@@ -73,7 +73,7 @@ public class DiskBalancerCluster {
   private static final Logger LOG =
       LoggerFactory.getLogger(DiskBalancerCluster.class);
   private static final ObjectReader READER =
-      new ObjectMapper().reader(DiskBalancerCluster.class);
+      new ObjectMapper().readerFor(DiskBalancerCluster.class);
   private final Set<String> exclusionList;
   private final Set<String> inclusionList;
   private ClusterConnector clusterConnector;
@@ -284,13 +284,13 @@ public class DiskBalancerCluster {
   public void createSnapshot(String snapShotName) throws IOException {
     String json = this.toJson();
     File outFile = new File(getOutput() + "/" + snapShotName);
-    FileUtils.writeStringToFile(outFile, json);
+    FileUtils.writeStringToFile(outFile, json, StandardCharsets.UTF_8);
   }
 
   /**
    * Compute plan takes a node and constructs a planner that creates a plan that
    * we would like to follow.
-   * <p/>
+   * <p>
    * This function creates a thread pool and executes a planner on each node
    * that we are supposed to plan for. Each of these planners return a NodePlan
    * that we can persist or schedule for execution with a diskBalancer
